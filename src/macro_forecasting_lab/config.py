@@ -2,14 +2,19 @@
 
 This module is the single source of truth for series definitions,
 transformations, split dates, horizons, and paths. ``configs/default.yaml``
-mirrors these values for CLI overrides; the dataclass below is what the code
-actually consumes.
+mirrors these values as flat top-level keys for CLI overrides; the dataclass
+below is what the code actually consumes. :func:`config_from_yaml` is a
+strict loader: every YAML key must be a :class:`Config` field and unknown
+keys raise ``ValueError`` (typos are never silently ignored).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -110,7 +115,13 @@ class Config:
     # Rolling-origin evaluation step (Tashman 2000): score every k-th test month.
     target_step: int = 3
     confidence_level: float = 0.95
-    dm_max_lag: int = 1  # HAC bandwidth for the Diebold-Mariano variance (lag-1)
+    # HAC bandwidth for the Diebold-Mariano variance. "auto" (default; the
+    # sentinel -1 is accepted as an alias) resolves to h-1 lags for h-step
+    # forecasts: overlapping h-step forecast errors follow an MA(h-1) process.
+    # An integer >= 1 forces a fixed bandwidth for every horizon (sensitivity
+    # runs; the pre-2026-10 default of a fixed lag 1 is kept available as a
+    # reported sensitivity specification).
+    dm_max_lag: int | str = "auto"
 
     # --- paths -----------------------------------------------------------------
     raw_dir: Path = REPO_ROOT / "data" / "raw"
@@ -138,3 +149,113 @@ class Config:
 
 
 DEFAULT_CONFIG = Config()
+
+
+# --------------------------------------------------------------------------
+# Validation + strict YAML loading
+# --------------------------------------------------------------------------
+def normalize_dm_max_lag(value: int | str) -> int | str:
+    """Validate/normalize a ``dm_max_lag`` setting.
+
+    Returns ``"auto"`` (bandwidth = horizon - 1, resolved per horizon at test
+    time) or a forced integer bandwidth >= 1. ``-1`` is accepted as an alias
+    for ``"auto"``. Anything else raises ``ValueError``.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() == "auto":
+            return "auto"
+        msg = (
+            f"dm_max_lag must be 'auto', -1, or an integer >= 1; got {value!r}"
+        )
+        raise ValueError(msg)
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"dm_max_lag must be 'auto', -1, or an integer >= 1; got {value!r}"
+        raise ValueError(msg)
+    if value == -1:
+        return "auto"
+    if value >= 1:
+        return int(value)
+    msg = f"dm_max_lag must be 'auto', -1, or an integer >= 1; got {value!r}"
+    raise ValueError(msg)
+
+
+_DATE_KEYS = ("train_end", "val_start", "val_end", "test_start")
+_TUPLE_KEYS = (
+    "horizons",
+    "own_lags",
+    "arima_pq_grid",
+    "sarima_seasonal_pq_grid",
+)
+_INT_KEYS = (
+    "cross_lag",
+    "seasonal_period",
+    "seed",
+    "n_estimators",
+    "target_step",
+)
+
+
+def config_from_yaml(path: str | Path) -> Config:
+    """Build a :class:`Config` from a YAML file (strict).
+
+    Every top-level YAML key must name a :class:`Config` field (including
+    ``series``); unknown keys raise ``ValueError`` so typos can never be
+    silently ignored. Known keys are type-checked and range-checked where
+    meaningful (dates must be ISO, ``confidence_level`` in (0, 1),
+    ``dm_max_lag`` via :func:`normalize_dm_max_lag`). Missing keys fall back
+    to the dataclass defaults.
+    """
+    with open(path, encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        msg = f"Config file {path} must contain a YAML mapping at top level"
+        raise ValueError(msg)
+
+    allowed = set(Config.__dataclass_fields__)
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        msg = (
+            f"Unknown config key(s) in {path}: {unknown}. "
+            f"Allowed keys: {sorted(allowed)}"
+        )
+        raise ValueError(msg)
+
+    kwargs: dict[str, object] = {}
+    if "series" in payload:
+        kwargs["series"] = tuple(SeriesSpec(**spec) for spec in payload["series"])
+    for key in _DATE_KEYS:
+        if key in payload:
+            try:
+                date.fromisoformat(str(payload[key])[:10])
+            except ValueError as exc:
+                msg = f"Config key {key!r} must be an ISO date: {exc}"
+                raise ValueError(msg) from exc
+            kwargs[key] = str(payload[key])
+    for key in _TUPLE_KEYS:
+        if key in payload:
+            values = payload[key]
+            if not isinstance(values, (list, tuple)):
+                msg = f"Config key {key!r} must be a list of integers"
+                raise ValueError(msg)
+            try:
+                kwargs[key] = tuple(int(v) for v in values)
+            except (TypeError, ValueError) as exc:
+                msg = f"Config key {key!r} must contain only integers: {exc}"
+                raise ValueError(msg) from exc
+    for key in _INT_KEYS:
+        if key in payload:
+            try:
+                kwargs[key] = int(payload[key])
+            except (TypeError, ValueError) as exc:
+                msg = f"Config key {key!r} must be an integer: {exc}"
+                raise ValueError(msg) from exc
+    if "confidence_level" in payload:
+        value = float(payload["confidence_level"])
+        if not 0.0 < value < 1.0:
+            msg = f"confidence_level must be in (0, 1); got {value}"
+            raise ValueError(msg)
+        kwargs["confidence_level"] = value
+    if "dm_max_lag" in payload:
+        kwargs["dm_max_lag"] = normalize_dm_max_lag(payload["dm_max_lag"])
+
+    return Config(**kwargs)

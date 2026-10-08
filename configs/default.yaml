@@ -1,47 +1,61 @@
-# Default configuration — mirrors macro_forecasting_lab.config.Config.
-# The dataclass in src/macro_forecasting_lab/config.py is the source of truth;
-# this file exists for CLI overrides via `scripts/run_experiments.py --config`.
+# Default configuration — macro-forecasting-lab.
+# Every key below is a TOP-LEVEL field of macro_forecasting_lab.config.Config
+# (single source of truth). The loader (config_from_yaml) is strict: any key
+# that is not a Config field raises ValueError, so typos are never silently
+# ignored. Override any of these via `scripts/run_experiments.py --config`.
 
-split:
-  train_end: "2009-12-31"
-  val_start: "2010-01-01"
-  val_end: "2015-12-31"
-  test_start: "2016-01-01"
-
-experiment:
-  horizons: [1, 12]
-  seed: 42
-  seasonal_period: 12
-  confidence_level: 0.95
-
+# --- series (FRED id, modeling column, transform, units, target flag) -------
 series:
   - fred_id: CPIAUCSL
     column: inflation_yoy
     transform: yoy_log_diff_pct
     units: "percent (12-month log difference x100)"
-    description: "CPI for All Urban Consumers (SA); transformed to YoY inflation."
+    description: "Consumer Price Index for All Urban Consumers (seasonally adjusted); transformed to year-over-year inflation."
     is_target: true
   - fred_id: UNRATE
     column: unemployment_rate
     transform: level
     units: "percent of labor force"
-    description: "Civilian unemployment rate (SA), levels."
+    description: "Civilian unemployment rate (seasonally adjusted), used in levels."
     is_target: true
   - fred_id: INDPRO
     column: industrial_production_yoy
     transform: yoy_log_diff_pct
     units: "percent (12-month log difference x100)"
-    description: "Industrial Production Index (SA); YoY growth. Feature-only."
+    description: "Industrial Production Index (seasonally adjusted); transformed to year-over-year growth. Feature-only."
     is_target: false
   - fred_id: FEDFUNDS
     column: fed_funds_rate
     transform: level
     units: "percent per year (monthly average)"
-    description: "Effective federal funds rate, monthly. Feature-only."
+    description: "Effective federal funds rate, monthly average. Feature-only. The daily series DFF is an alternative; FEDFUNDS is chosen because it is the canonical monthly series and aligns natively with our monthly frequency."
     is_target: false
   - fred_id: M2SL
     column: m2_yoy
     transform: yoy_log_diff_pct
     units: "percent (12-month log difference x100)"
-    description: "M2 money stock (SA); YoY growth. Feature-only."
+    description: "M2 money stock (seasonally adjusted); transformed to year-over-year growth. Feature-only."
     is_target: false
+
+# --- chronological split ----------------------------------------------------
+train_end: "2009-12-31"
+val_start: "2010-01-01"
+val_end: "2015-12-31"
+test_start: "2016-01-01"
+
+# --- experiment ---------------------------------------------------------------
+horizons: [1, 12]            # direct multi-step forecast horizons h
+own_lags: [0, 1, 2, 3, 6, 12]  # target lags used as supervised features
+cross_lag: 1                 # auxiliary series enter features lagged by this many months
+seasonal_period: 12          # annual seasonality (seasonal naive, MASE scale, SARIMA)
+arima_pq_grid: [0, 1, 2]     # AIC grid for ARIMA/SARIMA (p, q)
+sarima_seasonal_pq_grid: [0, 1]  # AIC grid for SARIMA seasonal (P, Q)
+seed: 42                     # pinned RNG seed (tree ensembles)
+n_estimators: 200            # trees per ensemble
+target_step: 3               # rolling-origin evaluation step (score every 3rd test month)
+confidence_level: 0.95       # prediction-interval coverage for ARIMA/SARIMA
+# Diebold-Mariano HAC bandwidth: "auto" = h-1 lags for horizon h (overlapping
+# h-step errors follow an MA(h-1); h=1 -> lag 0, h=12 -> lag 11). A fixed
+# integer >= 1 forces the same bandwidth at every horizon; -1 is an alias
+# for "auto". The fixed lag-1 specification is always reported as a sensitivity.
+dm_max_lag: auto

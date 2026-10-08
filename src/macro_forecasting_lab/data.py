@@ -98,7 +98,8 @@ def fill_monthly_gaps(series: pd.Series, max_consecutive: int = 2) -> pd.Series:
     shutdown). Rather than truncating all series, interior gaps of at most
     ``max_consecutive`` months are linearly interpolated *on the raw level*
     before any transformation; the number and location of filled months is a
-    documented data-handling decision (see README §7 and the research report).
+    documented data-handling decision (see README §7 "Data sources" and the
+    Data section of ``docs/research_report.md``).
     """
     grid = pd.date_range(series.index.min(), series.index.max(), freq="MS")
     reindexed = series.reindex(grid)

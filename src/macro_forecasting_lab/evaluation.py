@@ -9,8 +9,15 @@ Section 5.8.
 Diebold-Mariano: implemented after Diebold & Mariano (1995), "Comparing
 Predictive Accuracy", *Journal of Business & Economic Statistics* 13(3),
 253-263, using the squared (small-square) loss differential and a HAC
-long-run variance estimator truncated at lag 1. Both the asymptotic normal
-p-value and the small-sample t p-value (T-1 df) are returned.
+long-run variance estimator truncated at a caller-chosen lag. The project
+default resolves the bandwidth to ``h - 1`` for h-step-ahead forecasts: the
+overlapping h-step forecast errors of a fixed forecasting scheme follow an
+MA(h-1) process, so the loss differential inherits up to h-1 lags of
+autocorrelation. A bandwidth *smaller* than the overlap (e.g. the fixed lag 1
+formerly used at h = 12) understates the long-run variance and is therefore
+**anti-conservative**: it inflates |DM| and produces too many rejections. The
+lag-1 specification is retained as a reported sensitivity. Both the asymptotic
+normal p-value and the small-sample t p-value (T-1 df) are returned.
 """
 
 from __future__ import annotations
@@ -77,6 +84,27 @@ def mase(y_true: np.ndarray, y_pred: np.ndarray, scale: float) -> float:
 # --------------------------------------------------------------------------
 # Diebold-Mariano test (Diebold & Mariano 1995)
 # --------------------------------------------------------------------------
+def resolve_dm_max_lag(dm_max_lag: int | str, horizon: int) -> int:
+    """Resolve the DM HAC bandwidth for one forecast horizon.
+
+    ``"auto"`` (and the ``-1`` sentinel) means ``horizon - 1``: the
+    loss differential between two overlapping h-step forecast series follows
+    an MA(h-1) process under fixed schemes, so h-1 lags is the smallest
+    bandwidth that captures the overlap-induced autocorrelation. An integer
+    >= 1 forces a fixed bandwidth for every horizon (used for the reported
+    lag-1 sensitivity). Invalid settings raise ``ValueError``.
+    """
+    from macro_forecasting_lab.config import normalize_dm_max_lag
+
+    if horizon < 1:
+        msg = f"horizon must be >= 1, got {horizon}"
+        raise ValueError(msg)
+    normalized = normalize_dm_max_lag(dm_max_lag)
+    if normalized == "auto":
+        return horizon - 1
+    return int(normalized)
+
+
 def dm_test(
     errors_1: np.ndarray,
     errors_2: np.ndarray,
@@ -87,13 +115,18 @@ def dm_test(
 
     The loss differential is ``d_t = L(e1_t) - L(e2_t)`` with ``L(e) = e**2``
     (squared/"small-square" loss). The long-run variance of ``d_t`` is
-    estimated with a HAC estimator truncated at ``max_lag`` lags (default 1,
-    following the original paper's treatment of autocorrelated differentials):
+    estimated with a HAC estimator truncated at ``max_lag`` lags:
 
         V = (gamma_0 + 2 * sum_{k=1..max_lag} gamma_k) / T
 
-    Returns a dict with ``stat``, ``p_normal`` (asymptotic N(0,1)), and
-    ``p_t`` (Student-t with T-1 df, a common small-sample safeguard).
+    The bandwidth must be chosen by the caller: for overlapping h-step
+    forecasts the structurally correct default is ``h - 1`` (see
+    :func:`resolve_dm_max_lag`). A bandwidth smaller than the overlap is
+    anti-conservative (understates the variance, inflates |DM|); a bandwidth
+    larger than necessary loses power. ``max_lag=0`` is allowed and reduces
+    the variance to ``gamma_0 / T`` (appropriate for non-overlapping h=1
+    errors). Returns a dict with ``stat``, ``p_normal`` (asymptotic N(0,1)),
+    and ``p_t`` (Student-t with T-1 df, a common small-sample safeguard).
     A negative statistic means model 1 has *smaller* average loss (better).
     """
     e1 = np.asarray(errors_1, dtype=float)
@@ -146,8 +179,18 @@ def metric_row(
     dm_stat: float | None = None,
     dm_p: float | None = None,
     dm_p_t: float | None = None,
+    dm_max_lag: int | None = None,
+    dm_stat_lag1: float | None = None,
+    dm_p_lag1: float | None = None,
+    dm_p_t_lag1: float | None = None,
 ) -> dict[str, object]:
-    """One tidy record for ``results.csv``."""
+    """One tidy record for ``results.csv``.
+
+    ``dm_*`` columns hold the primary DM test (bandwidth resolved from the
+    config, ``h - 1`` by default; ``dm_max_lag`` records the value used).
+    ``dm_*_lag1`` columns hold the fixed lag-1 sensitivity specification,
+    computed on the same loss differentials.
+    """
     mape_value, mape_excluded = mape(y_true, y_pred)
     return {
         "series": series,
@@ -163,4 +206,8 @@ def metric_row(
         "dm_stat_vs_seasonal_naive": dm_stat,
         "dm_p_value": dm_p,
         "dm_p_value_t": dm_p_t,
+        "dm_max_lag": dm_max_lag,
+        "dm_stat_vs_seasonal_naive_lag1": dm_stat_lag1,
+        "dm_p_value_lag1": dm_p_lag1,
+        "dm_p_value_t_lag1": dm_p_t_lag1,
     }

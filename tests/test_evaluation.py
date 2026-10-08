@@ -15,6 +15,7 @@ from macro_forecasting_lab.evaluation import (
     mase,
     mase_scale,
     metric_row,
+    resolve_dm_max_lag,
     rmse,
 )
 
@@ -116,6 +117,60 @@ def test_dm_normal_vs_t_pvalue_relation() -> None:
         2.0 * scipy_stats.t.sf(z, df=39), rel=1e-9
     )
     assert result["p_t"] >= result["p_normal"]
+
+
+# --------------------------------------------------------------------------
+# DM bandwidth selection
+# --------------------------------------------------------------------------
+def test_resolve_dm_max_lag_auto_is_h_minus_1() -> None:
+    """"auto" (and the -1 sentinel) resolve to h-1; h=12 must give lag 11."""
+    assert resolve_dm_max_lag("auto", 12) == 11
+    assert resolve_dm_max_lag("auto", 1) == 0
+    assert resolve_dm_max_lag(-1, 12) == 11
+    assert resolve_dm_max_lag(-1, 1) == 0
+    # A forced integer bandwidth passes through unchanged.
+    assert resolve_dm_max_lag(1, 12) == 1
+    assert resolve_dm_max_lag(3, 1) == 3
+    # Invalid settings raise.
+    with pytest.raises(ValueError, match="dm_max_lag"):
+        resolve_dm_max_lag("yesterday", 12)
+    with pytest.raises(ValueError, match="dm_max_lag"):
+        resolve_dm_max_lag(0, 12)
+    with pytest.raises(ValueError, match="horizon"):
+        resolve_dm_max_lag("auto", 0)
+
+
+def test_dm_test_zero_lag_hand_computed() -> None:
+    """max_lag=0 reduces the HAC variance to gamma_0/T (no overlap terms)."""
+    e1 = np.array([1.0, -1.0, 2.0, -2.0, 0.5])
+    e2 = np.array([0.5, 0.5, -1.0, 1.0, -0.5])
+    d = e1**2 - e2**2
+    n = len(d)
+    centered = d - d.mean()
+    gamma_0 = float(np.dot(centered, centered) / n)
+    expected = float(d.mean() / np.sqrt(gamma_0 / n))
+    result = dm_test(e1, e2, max_lag=0)
+    assert result["stat"] == pytest.approx(expected)
+
+
+def test_smaller_bandwidth_inflates_dm_stat_for_autocorrelated_differential() -> None:
+    """A too-small HAC bandwidth is ANTI-conservative: for a positively
+    autocorrelated loss differential it understates the long-run variance and
+    inflates |DM|. This is why lag-1 at h=12 (MA(11) overlap) overstated
+    significance in the pre-fix results."""
+    rng = np.random.default_rng(11)
+    # Positively autocorrelated loss differential d_t (AR(1), rho = 0.7).
+    d = np.empty(200)
+    d[0] = rng.normal(0.5, 1.0)
+    for t in range(1, 200):
+        d[t] = 0.7 * d[t - 1] + rng.normal(0.5, 1.0)
+    # Construct error vectors whose squared-error differential is d_t.
+    e2 = np.abs(rng.normal(0.0, 2.0, 200))
+    e1 = np.sqrt(np.maximum(e2**2 + d, 1e-6))
+    narrow = dm_test(e1, e2, max_lag=0)
+    wide = dm_test(e1, e2, max_lag=11)
+    assert abs(narrow["stat"]) > abs(wide["stat"])
+    assert narrow["p_normal"] < wide["p_normal"]
 
 
 # --------------------------------------------------------------------------

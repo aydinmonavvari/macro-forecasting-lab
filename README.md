@@ -57,9 +57,11 @@ significance testing rather than eyeballing RMSE tables.
 5. **Rolling-origin evaluation** — models are re-fit at each evaluation origin and scored
    on every 3rd test month (evaluation step; Tashman 2000), producing genuine
    out-of-sample forecasts across 2016-01 → 2026-07.
-6. **Significance testing** — Diebold–Mariano (1995) tests with HAC variance compare
-   every model against the seasonal-naive benchmark; a Holm-style multiple-testing
-   caution is applied in the interpretation.
+6. **Significance testing** — Diebold–Mariano (1995) tests with a HAC long-run variance
+   whose bandwidth is `h − 1` lags for h-step forecasts (`dm_max_lag: auto`; the fixed
+   lag-1 specification is reported as a sensitivity) compare every non-benchmark model —
+   `naive_last` included — against the seasonal-naive benchmark; a Bonferroni/Holm-style
+   multiple-testing caution is applied in the interpretation (§13.4).
 7. **Structural-break analysis** — all metrics are reported for the full test window and
    for a window excluding the COVID disruption (2020-02 → 2020-12).
 
@@ -82,6 +84,10 @@ Louis), retrieved either through the public chart-data CSV endpoint or the offic
 API (free key, read from the `FRED_API_KEY` environment variable only — never hardcoded
 or committed). FRED data are freely redistributable with attribution to the source.
 Raw CSVs are cached under `data/raw/` (git-ignored) so the full study reruns offline.
+Interior monthly gaps of at most 2 months are linearly interpolated on the raw levels
+*before* any transformation (`fill_monthly_gaps` in `src/macro_forecasting_lab/data.py`);
+no gap required filling in this sample, and the policy is a documented data-handling
+decision.
 
 ## 8 · Architecture
 
@@ -142,10 +148,14 @@ unemployment — ARIMA(2,0,2), SARIMA(2,0,2)(1,0,0)₁₂.
 - **RMSE / MAE** in the natural units of each series.
 - **MASE** — mean absolute scaled error against the in-sample seasonal-naive benchmark
   (Hyndman & Koehler 2006): MASE < 1 beats the seasonal naive on absolute error.
-- **Diebold–Mariano p-value** — whether a model's loss difference vs the seasonal naive
-  is statistically significant (HAC lag-1 variance; small-sample interpretation is
-  cautious, and a Holm-type multiple-testing caution is applied across the 8 model
-  comparisons per series).
+- **Diebold–Mariano p-values** — whether a model's loss difference vs the seasonal
+  naive is statistically significant. The HAC variance bandwidth is `h − 1` lags for
+  h-step forecasts (`dm_max_lag: auto`): overlapping h-step forecast errors follow an
+  MA(h−1) process, so a *smaller* bandwidth is anti-conservative (it understates the
+  long-run variance and inflates |DM|). A fixed lag-1 bandwidth is reported alongside
+  as a sensitivity. Raw p-values are always shown; a Bonferroni/Holm-style
+  multiple-testing caution is applied across the 7 non-benchmark model comparisons per
+  series/horizon/window (§13.4).
 - **Prediction-interval coverage** visualized for ARIMA/SARIMA.
 
 ## 12 · Results
@@ -156,17 +166,22 @@ Full tables: [`reports/results.csv`](reports/results.csv); window excluding COVI
 
 **US CPI inflation (YoY, %):**
 
-| Horizon | Best model | RMSE | MASE | DM p (vs seasonal naive) | Reading |
-| --- | --- | --- | --- | --- | --- |
-| h = 1 | SARIMA(2,1,2)(1,0,1)₁₂ | 0.246 | 0.123 | **0.014** | significantly beats seasonal naive |
-| h = 12 | OLS + lags | 1.652 | 0.961 | 0.133 | nominally best; **not** significant |
+| Horizon | Best model | RMSE | MASE | DM p (h−1) | DM p (lag-1) | Reading |
+| --- | --- | --- | --- | --- | --- | --- |
+| h = 1 | SARIMA(2,1,2)(1,0,1)₁₂ | 0.246 | 0.123 | **0.0001** | 0.014 | significantly beats the seasonal naive; the only model that also clearly beats `naive_last` |
+| h = 12 | OLS + lags | 1.652 | 0.961 | 0.131 | 0.133 | nominally best; **not** significant under either bandwidth |
 
 **US unemployment rate (%):**
 
-| Horizon | Best model (RMSE) | RMSE | MASE | DM p (vs seasonal naive) | Reading |
-| --- | --- | --- | --- | --- | --- |
-| h = 1 | Gradient Boosting | 1.595 | 0.512 | 0.081 | RMSE edge over naive_last, **not** significant at 5%; naive_last has the better MASE (0.470) |
-| h = 12 | rolling 12m mean | 2.448 | 1.799 | 0.596 | **no model beats the seasonal naive**; SARIMA is worst (MASE 2.46) |
+| Horizon | Best model (RMSE) | RMSE | MASE | DM p (h−1) | DM p (lag-1) | Reading |
+| --- | --- | --- | --- | --- | --- | --- |
+| h = 1 | Gradient Boosting | 1.595 | 0.512 | 0.022 | 0.081 | raw p < 0.05 vs the seasonal naive, but it does **not** survive the family correction (§13.4); `naive_last` has the better MASE (0.470) |
+| h = 12 | rolling 12m mean | 2.448 | 1.799 | 0.157 | 0.596 | **no model beats the seasonal naive**; SARIMA is worst by RMSE (5.13) and Random Forest worst by MASE (2.66) |
+
+Every non-benchmark model — `naive_last` included — is tested against the seasonal-naive
+benchmark (7 comparisons per series/horizon/window; the benchmark itself has no DM row).
+At h = 12 `naive_last` and the seasonal naive coincide by construction, so `naive_last`'s
+DM row there is degenerate (statistic exactly 0).
 
 Key figures (generated by the pipeline from the actual run):
 
@@ -184,24 +199,34 @@ Equivalent figures for unemployment are committed under the same naming scheme.
 ## 13 · Interpretation
 
 1. **Horizon is destiny.** At h=1, structure-exploiting models deliver real gains where
-   the target has strong dynamics (inflation: SARIMA, DM p = 0.014). At h=12, *no* model
-   significantly beats the seasonal naive for either series — the information in the
-   monthly history simply does not support accurate year-ahead point forecasts, which is
-   consistent with the published macro-forecasting literature.
-2. **Machine learning adds little here, honestly measured.** Random Forest and Gradient
-   Boosting never significantly outperform the seasonal naive at any horizon. On short
-   monthly macro samples (≈ 660 training observations), flexible learners mostly fit
-   noise; the regularized linear model with lagged features is the only ML-family model
-   that is ever nominally best.
+   the target has strong dynamics (inflation: SARIMA, raw DM p ≈ 0.0001 under the
+   primary h−1 bandwidth — a result that survives the 28-comparison family correction;
+   under the lag-1 sensitivity, p = 0.014, which does not survive). At h=12, *no* model
+   significantly beats the seasonal naive for either series under either bandwidth — the
+   information in the monthly history simply does not support accurate year-ahead point
+   forecasts, which is consistent with the published macro-forecasting literature.
+2. **Machine learning adds little here, honestly measured.** At inflation h=1 the tree
+   ensembles clear the seasonal-naive bar exactly like every other non-benchmark model —
+   but that bar is very weak (the seasonal naive has MASE 1.14 for inflation). Against
+   the *strong* naive baseline (`naive_last`), Random Forest and Gradient Boosting win
+   nowhere, at any horizon or series; at unemployment their raw DM p ≈ 0.022 (primary
+   bandwidth) fails the family correction, and the lag-1 sensitivity does not even reach
+   nominal significance (p ≈ 0.08). On short monthly macro samples (600 training months,
+   1960-01 → 2009-12), flexible learners mostly fit noise; the linear model with lagged
+   features (OLS) is the only ML-family model that is ever nominally best.
 3. **The best "model" is often persistence.** For unemployment excluding COVID, the
    naive last-value forecast is essentially unbeatable at h=1 (MASE 0.122) — monthly
    unemployment is extremely persistent outside recessions. Any claimed ML edge in the
    full window comes almost entirely from the COVID episode.
-4. **Multiple-testing caution.** Eight models are compared per series/horizon. Under a
-   Holm correction across these comparisons, even the significant SARIMA result for
-   inflation h=1 (raw p = 0.014) would not survive at α = 0.05. The honest summary is
-   "suggestive evidence that seasonal structure helps short-horizon inflation
-   forecasting", not "SARIMA significantly beats baselines".
+4. **Multiple-testing caution.** Seven non-benchmark models are compared against the
+   same seasonal-naive benchmark per series/horizon/window. Per scoring window the
+   family is therefore 7 models × 2 series × 2 horizons = **28 comparisons**, and a
+   Bonferroni-corrected threshold of 0.05/28 ≈ 0.0018 (the first Holm step) is the
+   appropriate reading. Under the primary h−1 bandwidth the seven inflation h=1
+   comparisons (raw p ≤ 0.0004) survive; every other rejection — including unemployment
+   h=1 (raw p ≈ 0.022) — does not. Under the lag-1 sensitivity no comparison survives
+   (smallest raw p = 0.014). Raw p-values are always reported so readers can apply any
+   other correction.
 5. **COVID as a structural break.** Excluding 2020-02→2020-12 changes unemployment
    metrics by an order of magnitude (naive h=1 RMSE falls from 1.60 to 0.14), while
    inflation metrics barely move. Forecast evaluations on 2016+ macro data are,
@@ -209,12 +234,18 @@ Equivalent figures for unemployment are committed under the same naming scheme.
 
 ## 14 · Limitations
 
-- **Revised data (no real-time vintages).** FRED series are final revised values; a
-  forecaster in 2016 would not have seen 2016-revised 2014 data. Real-time vintage
-  analysis (ALFRED) is future work; results here are an upper bound on real-time
-  accuracy.
-- **Small sample.** ~660 training observations, 43 scored test months; DM tests with
-  HAC bandwidth 1 have low power at h=12.
+- **Revised, contemporaneous data (no real-time vintages).** FRED series are final
+  revised values, and the information set is contemporaneous: the supervised features
+  include the target's own origin-month value (`y_l0`), and cross-series features enter
+  lagged one month. In real time, the CPI observation for a month is published ≈2–3
+  weeks and the unemployment rate ≈4–5 weeks after the reference month, and the earliest
+  available observations would be preliminary, not revised. This design is therefore
+  **not** a real-time/vintage simulation, and the results are an upper bound on
+  real-time accuracy. Vintage analysis (ALFRED) is future work.
+- **Small sample.** 600 training months (1960-01 → 2009-12), 72 validation months,
+  43 scored test months. At h=12 the structurally correct h−1 HAC bandwidth is
+  conservative and the lag-1 sensitivity is anti-conservative; either way the DM tests
+  have limited power — "not significant" must not be read as "no difference".
 - **Fixed evaluation step.** Scoring every 3rd test month (43 points) trades granularity
   for compute; the step is applied identically in prediction and scoring and is a
   standard rolling-origin design (Tashman 2000).
@@ -238,7 +269,7 @@ python scripts/download_data.py
 # 3) run the full study (~6 min on 4 CPU cores; offline from the cache afterwards)
 python scripts/run_experiments.py
 
-# 4) verify: lint + 34 offline unit tests
+# 4) verify: lint + 48 offline unit tests
 ruff check .
 pytest -q
 ```
@@ -329,7 +360,7 @@ macro-forecasting-lab/
 │   ├── evaluation.py      # RMSE/MAE/MASE, Diebold–Mariano, COVID-exclusion masks
 │   ├── plots.py           # split shading, forecasts, intervals, DM charts
 │   └── pipeline.py        # end-to-end orchestration
-├── tests/                 # 34 offline unit tests (split integrity, leakage, metrics)
+├── tests/                 # 48 offline unit tests (config, splits, leakage, metrics, DM bandwidth)
 ├── notebooks/             # EDA of the real FRED series
 ├── scripts/               # download_data.py, run_experiments.py
 ├── configs/default.yaml
@@ -342,7 +373,8 @@ macro-forecasting-lab/
 
 ## 20 · Future work
 
-- Real-time vintage evaluation via ALFRED to quantify the revision gap.
+- Real-time vintage evaluation via ALFRED to quantify the revision and
+  publication-lag penalty (see §14).
 - Regime-switching / time-varying-parameter models for structural breaks.
 - Density forecasting and probability-of-recession classifiers.
 - Extend targets to INDPRO, FEDFUNDS, M2SL and a global (World Bank) panel.

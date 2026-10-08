@@ -10,7 +10,10 @@ Running :func:`run` performs the full study:
 5. rolling-origin direct-h forecasts at h=1 and h=12 for every model,
 6. metrics (RMSE/MAE/MAPE/MASE) on the full test window and excluding the
    COVID structural-break window (2020-02..2020-12),
-7. Diebold-Mariano tests vs. the seasonal-naive benchmark,
+7. Diebold-Mariano tests vs. the seasonal-naive benchmark. The HAC variance
+   bandwidth defaults to ``h - 1`` for h-step forecasts (``dm_max_lag: auto``):
+   overlapping h-step errors follow an MA(h-1), and a smaller bandwidth is
+   anti-conservative. A fixed lag-1 sensitivity is reported alongside,
 8. tidy results CSV, prediction dump, figures, and a Markdown summary.
 """
 
@@ -164,7 +167,16 @@ def score_predictions(
     column: str,
     config: Config,
 ) -> pd.DataFrame:
-    """Turn raw rolling-origin predictions into tidy metric rows (both windows)."""
+    """Turn raw rolling-origin predictions into tidy metric rows (both windows).
+
+    Every non-benchmark model is tested against the seasonal-naive benchmark
+    with the Diebold-Mariano test. Benchmark errors are precomputed *before*
+    the model loop so benchmark-independent models earlier in the dictionary
+    order (e.g. ``naive_last``) also receive a DM test. The primary DM
+    specification uses the configured HAC bandwidth (``dm_max_lag: "auto"``
+    resolves to ``h - 1``); the fixed lag-1 specification is stored in
+    separate ``*_lag1`` columns as a reported sensitivity.
+    """
     test_start = pd.Timestamp(config.test_start)
     # Rolling-origin evaluation step: score on every k-th test month only.
     # This is a standard variance/compute trade-off (Tashman 2000) and is
@@ -174,23 +186,57 @@ def score_predictions(
     benchmark = "seasonal_naive"
 
     for h, model_preds in predictions.items():
+        dm_lag = ev.resolve_dm_max_lag(config.dm_max_lag, h)
         for window, keep in (
             ("full", np.ones(len(targets), dtype=bool)),
             ("ex_covid", ev.exclude_covid_mask(targets)),
         ):
             window_targets = targets[keep]
             actual = y.reindex(window_targets).to_numpy()
-            benchmark_errors = None
+
+            # Precompute benchmark errors so every non-benchmark model —
+            # regardless of dict order — can be tested against them.
+            benchmark_pred = model_preds.get(benchmark)
+            bench_aligned = (
+                benchmark_pred.reindex(window_targets)
+                if benchmark_pred is not None
+                else None
+            )
+            bench_valid = (
+                bench_aligned.notna().to_numpy() if bench_aligned is not None else None
+            )
+            benchmark_errors = (
+                bench_aligned.to_numpy()[bench_valid] - actual[bench_valid]
+                if bench_aligned is not None
+                else None
+            )
+
             for model_name, pred in model_preds.items():
                 aligned = pred.reindex(window_targets)
                 valid = aligned.notna().to_numpy()
-                errors = aligned.to_numpy()[valid] - actual[valid]
-                if model_name == benchmark:
-                    benchmark_errors = errors
                 dm_stat = dm_p = dm_p_t = None
-                if model_name != benchmark and benchmark_errors is not None:
-                    dm = ev.dm_test(errors, benchmark_errors, max_lag=config.dm_max_lag)
-                    dm_stat, dm_p, dm_p_t = dm["stat"], dm["p_normal"], dm["p_t"]
+                dm_stat1 = dm_p1 = dm_p_t1 = None
+                lag_used: int | None = None
+                if (
+                    model_name != benchmark
+                    and benchmark_errors is not None
+                    and len(benchmark_errors) >= 3
+                ):
+                    # Align model and benchmark on their common valid targets
+                    # so the two error vectors always have equal length.
+                    common = valid & bench_valid
+                    model_errors = aligned.to_numpy()[common] - actual[common]
+                    bench_errors = bench_aligned.to_numpy()[common] - actual[common]
+                    if len(model_errors) >= 3:
+                        dm = ev.dm_test(model_errors, bench_errors, max_lag=dm_lag)
+                        dm_stat, dm_p, dm_p_t = dm["stat"], dm["p_normal"], dm["p_t"]
+                        dm1 = ev.dm_test(model_errors, bench_errors, max_lag=1)
+                        dm_stat1, dm_p1, dm_p_t1 = (
+                            dm1["stat"],
+                            dm1["p_normal"],
+                            dm1["p_t"],
+                        )
+                        lag_used = dm_lag
                 rows.append(
                     ev.metric_row(
                         series=column,
@@ -203,6 +249,10 @@ def score_predictions(
                         dm_stat=dm_stat,
                         dm_p=dm_p,
                         dm_p_t=dm_p_t,
+                        dm_max_lag=lag_used,
+                        dm_stat_lag1=dm_stat1,
+                        dm_p_lag1=dm_p1,
+                        dm_p_t_lag1=dm_p_t1,
                     )
                 )
     return pd.DataFrame(rows)
@@ -276,7 +326,8 @@ def make_figures(
                     preds["sarima"],
                     bucket["lower"],
                     bucket["upper"],
-                    title=f"{column} — SARIMA direct {h}-step forecast with 95% interval",
+                    title=f"{column} — SARIMA direct {h}-step forecast with "
+                    f"{config.confidence_level:.0%} interval",
                     ylabel=ylabel,
                     path=figures_dir / f"intervals_{column}_sarima_h{h}.png",
                 )
@@ -431,11 +482,12 @@ def _verdict_lines(results: pd.DataFrame, column: str, horizon: int) -> list[str
     if len(significant) > 0:
         names = ", ".join(f"`{m}`" for m in significant.model)
         lines.append(
-            f"- **Significantly better than seasonal-naive at 5% (DM, full window):** {names}."
+            f"- **Raw DM p < 0.05 vs seasonal-naive (full window):** {names} "
+            "(raw p-values; see the Bonferroni note under Honesty notes)."
         )
     else:
         lines.append(
-            "- **Significantly better than seasonal-naive at 5% (DM, full window):** none."
+            "- **Raw DM p < 0.05 vs seasonal-naive (full window):** none."
         )
     return lines
 
@@ -447,15 +499,31 @@ def write_summary(
     config: Config,
 ) -> None:
     """Write ``reports/summary.md`` with actual numbers from the run."""
+    # Multiple-comparison family, computed from the data (not hard-coded):
+    # every non-benchmark model is tested against the same seasonal-naive
+    # benchmark for each series x horizon within each scoring window.
+    non_benchmark_models = sorted(m for m in results.model.unique() if m != "seasonal_naive")
+    n_comparisons_per_series = len(non_benchmark_models) * results.horizon.nunique()
+    family_per_window = n_comparisons_per_series * results.series.nunique()
+    bonferroni_alpha = 0.05 / family_per_window
+
     lines = [
         "# macro-forecasting-lab — experiment summary",
         "",
         f"_Generated automatically by the pipeline. Data coverage: "
         f"{coverage['first']} .. {coverage['last']} ({coverage['n_months']} months)._",
         "",
-        "Split: train <= 2009-12, validation 2010-01..2015-12, test 2016-01..latest.",
+        f"Split: train <= {config.train_end}, validation {config.val_start}.."
+        f"{config.val_end}, test {config.test_start}..latest.",
         "Windows: `full` = whole test window; `ex_covid` = test window excluding "
         "2020-02..2020-12 (COVID-19 structural break).",
+        "",
+        "Diebold-Mariano specification: the primary `DM p` column uses a HAC "
+        f"bandwidth of h-1 lags (dm_max_lag = {config.dm_max_lag!r}: overlapping "
+        "h-step forecast errors follow an MA(h-1); h=1 -> lag 0, h=12 -> lag 11). ",
+        "`DM p (lag-1)` is the fixed lag-1 sensitivity specification. A smaller "
+        "than necessary bandwidth is anti-conservative (inflates |DM|), not "
+        "low-power.",
         "",
     ]
 
@@ -477,13 +545,14 @@ def write_summary(
                     & (results.horizon == horizon)
                     & (results.window == window_name),
                     ["model", "n_obs", "rmse", "mae", "mape_pct", "mase",
-                     "dm_stat_vs_seasonal_naive", "dm_p_value"],
+                     "dm_stat_vs_seasonal_naive", "dm_p_value", "dm_p_value_lag1"],
                 ].sort_values("rmse")
                 lines += [
                     f"### {column} — h={horizon}, window={window_name}",
                     "",
-                    "| model | n | RMSE | MAE | MAPE % | MASE | DM stat | DM p |",
-                    "|---|---|---|---|---|---|---|---|",
+                    "| model | n | RMSE | MAE | MAPE % | MASE | DM stat "
+                    "| DM p (h-1) | DM p (lag-1) |",
+                    "|---|---|---|---|---|---|---|---|---|",
                 ]
                 for _, row in table.iterrows():
                     dm = (
@@ -492,9 +561,14 @@ def write_summary(
                         else "—"
                     )
                     dm_p = f"{row.dm_p_value:.3f}" if pd.notna(row.dm_p_value) else "—"
+                    dm_p_lag1 = (
+                        f"{row.dm_p_value_lag1:.3f}"
+                        if pd.notna(row.dm_p_value_lag1)
+                        else "—"
+                    )
                     lines.append(
                         f"| {row.model} | {int(row.n_obs)} | {row.rmse:.3f} | {row.mae:.3f} | "
-                        f"{row.mape_pct:.2f} | {row.mase:.3f} | {dm} | {dm_p} |"
+                        f"{row.mape_pct:.2f} | {row.mase:.3f} | {dm} | {dm_p} | {dm_p_lag1} |"
                     )
                 lines.append("")
             lines += _verdict_lines(results, column, horizon)
@@ -503,9 +577,27 @@ def write_summary(
     lines += [
         "## Honesty notes",
         "",
-        "- DM p-values are raw; with 7 models x 2 series x 2 horizons compared against the",
-        "  same benchmark, a Bonferroni-corrected threshold (~0.05/14 ≈ 0.0036 per window)",
-        "  is the appropriate reading — see README §14.",
+        f"- DM p-values are raw. Each window contains {len(non_benchmark_models)} non-benchmark "
+        f"models x {results.series.nunique()} series x {results.horizon.nunique()} horizons = "
+        f"{family_per_window} comparisons against the same seasonal-naive benchmark, so a "
+        f"Bonferroni-corrected threshold (0.05/{family_per_window} ≈ {bonferroni_alpha:.4f} "
+        "per window) is the appropriate reading — see the multiple-testing caution in "
+        "README §13.",
+        "- The primary DM specification uses a HAC bandwidth of h-1 lags "
+        "(h=1 -> 0, h=12 -> 11), matching the MA(h-1) overlap structure of "
+        "h-step forecast errors; the lag-1 columns are the sensitivity. At h=12 "
+        "the old fixed lag-1 bandwidth was anti-conservative: it understates the "
+        "variance of the overlapping loss differential and inflates |DM|.",
+    ]
+    if any(h == config.seasonal_period for h in config.horizons):
+        lines += [
+            "- At h = seasonal_period "
+            f"({config.seasonal_period}), naive_last and seasonal_naive produce "
+            "identical forecasts by construction (the value one full season back IS "
+            "the last observed value at a 12-month origin), so naive_last's DM test "
+            "against the benchmark is degenerate (statistic exactly 0, p = 1).",
+        ]
+    lines += [
         "- MAPE is unstable for inflation near zero (deflation episodes); rely on MASE.",
         "- MASE is scaled by the in-sample seasonal-naive MAE on the training window",
         "  (Hyndman & Athanasopoulos, §5.8).",
