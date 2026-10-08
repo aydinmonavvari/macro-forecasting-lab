@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "macro-forecasting-lab: forecasting US macroeconomic indicators with statistical and machine-learning models"
+authors:
+  - family-names: Monavvari
+    given-names: Aydin
+    email: 245710241+aydinmonavvari@users.noreply.github.com
+date-released: "2026-10-08"
+version: "1.0.0"
+repository-code: "https://github.com/aydinmonavvari/macro-forecasting-lab"
+keywords:
+  - macroeconomics
+  - forecasting
+  - time-series
+  - machine-learning
+license: MIT
+abstract: >-
+  A research-oriented laboratory comparing classical statistical models
+  (ARIMA/SARIMA) and machine-learning regressors against naive baselines for
+  forecasting US inflation and unemployment, under strict chronological
+  out-of-sample validation with explicit leakage discipline and
+  Diebold-Mariano tests of equal predictive accuracy.
