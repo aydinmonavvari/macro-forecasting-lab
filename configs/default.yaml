@@ -1,0 +1,47 @@
+# Default configuration — mirrors macro_forecasting_lab.config.Config.
+# The dataclass in src/macro_forecasting_lab/config.py is the source of truth;
+# this file exists for CLI overrides via `scripts/run_experiments.py --config`.
+
+split:
+  train_end: "2009-12-31"
+  val_start: "2010-01-01"
+  val_end: "2015-12-31"
+  test_start: "2016-01-01"
+
+experiment:
+  horizons: [1, 12]
+  seed: 42
+  seasonal_period: 12
+  confidence_level: 0.95
+
+series:
+  - fred_id: CPIAUCSL
+    column: inflation_yoy
+    transform: yoy_log_diff_pct
+    units: "percent (12-month log difference x100)"
+    description: "CPI for All Urban Consumers (SA); transformed to YoY inflation."
+    is_target: true
+  - fred_id: UNRATE
+    column: unemployment_rate
+    transform: level
+    units: "percent of labor force"
+    description: "Civilian unemployment rate (SA), levels."
+    is_target: true
+  - fred_id: INDPRO
+    column: industrial_production_yoy
+    transform: yoy_log_diff_pct
+    units: "percent (12-month log difference x100)"
+    description: "Industrial Production Index (SA); YoY growth. Feature-only."
+    is_target: false
+  - fred_id: FEDFUNDS
+    column: fed_funds_rate
+    transform: level
+    units: "percent per year (monthly average)"
+    description: "Effective federal funds rate, monthly. Feature-only."
+    is_target: false
+  - fred_id: M2SL
+    column: m2_yoy
+    transform: yoy_log_diff_pct
+    units: "percent (12-month log difference x100)"
+    description: "M2 money stock (SA); YoY growth. Feature-only."
+    is_target: false
